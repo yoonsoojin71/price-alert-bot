@@ -1,0 +1,71 @@
+# .github/workflows/price_alert.yml
+#
+# ┌─ 한국 시간(KST = UTC+9) 스케줄 설계 ─────────────────────────────────┐
+# │ 낮  시간 (KST 09:00 ~ 24:00) → UTC 00:00 ~ 15:00  → 30분마다        │
+# │ 새벽 시간 (KST 00:00 ~ 09:00) → UTC 15:00 ~ 00:00  → 3시간마다      │
+# │                                                                       │
+# │ GitHub Actions cron은 UTC 기준이므로 아래처럼 분리합니다.             │
+# └───────────────────────────────────────────────────────────────────────┘
+
+name: 가격 변동 알림 봇
+
+on:
+  # ── 낮 시간 (KST 09:00~24:00 / UTC 00:00~15:00) : 30분마다 ──
+  schedule:
+    - cron: "0,30 0-14 * * *"   # UTC 00:00~14:30 (KST 09:00~23:30)
+    - cron: "0    15  * * *"    # UTC 15:00        (KST 24:00/00:00)
+
+    # ── 새벽 시간 (KST 00:00~09:00 / UTC 15:00~00:00) : 3시간마다 ──
+    - cron: "0 15,18,21 * * *"  # UTC 15:00, 18:00, 21:00
+    #        └ 15:00는 낮/새벽 경계라 위와 중복되지만 무해합니다.
+
+  # 수동 실행 버튼 (테스트용)
+  workflow_dispatch:
+
+jobs:
+  check-prices:
+    runs-on: ubuntu-latest
+    # 단일 실행 보장: 이전 실행이 끝나지 않으면 대기 후 실행
+    concurrency:
+      group: price-check
+      cancel-in-progress: false
+
+    steps:
+      # ── 1. 코드 체크아웃 ───────────────────────────────────────────────
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+        with:
+          # products.csv를 push하려면 쓰기 권한 필요
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Python 환경 설정 ───────────────────────────────────────────
+      - name: Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── 3. 의존성 설치 ────────────────────────────────────────────────
+      - name: 패키지 설치
+        run: pip install -r requirements.txt
+
+      # ── 4. 가격 체커 실행 ─────────────────────────────────────────────
+      - name: 가격 변동 체크
+        env:
+          TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          PRODUCTS_CSV:      products.csv
+        run: python price_checker.py
+
+      # ── 5. 업데이트된 CSV 자동 커밋 ──────────────────────────────────
+      #    가격이 바뀌었을 때만 products.csv가 변경되므로,
+      #    변경사항이 없으면 커밋하지 않습니다.
+      - name: products.csv 변경 커밋
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add products.csv
+          # 변경사항이 있을 때만 커밋
+          git diff --cached --quiet || \
+            git commit -m "chore: 가격 업데이트 $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M KST')"
+          git push
